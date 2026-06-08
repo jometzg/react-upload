@@ -36,9 +36,18 @@ function App() {
               fileSize: file.size,
               contentType: file.type || 'application/octet-stream',
             })
+            uppy.setFileMeta(file.id, {
+              blobName: sas.blobName,
+              sasExpiryUtc: sas.expiresOn,
+            })
             return sas.uploadUrl
           } catch (err) {
             throw new Error(`SAS request failed: ${err.message}`)
+          }
+        },
+        getResponseData(response) {
+          return {
+            url: response.responseURL || '',
           }
         },
       })
