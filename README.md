@@ -87,6 +87,61 @@ Response:
 }
 ```
 
+## How Large File Upload Works
+
+Uploading multi-gigabyte files to Azure Blob Storage from a browser requires a different approach to a simple HTTP PUT. The app uses a two-phase strategy: the backend issues a short-lived token, and the frontend streams the file directly to Azure in parallel chunks.
+
+### Backend — SAS Token Issuance (`POST /api/upload/sas`)
+
+The backend never receives the file itself. It only issues a **User Delegation SAS token** that gives the browser temporary permission to write one specific blob directly to Azure.
+
+1. The frontend sends the file name, size, and content type to `POST /api/upload/sas`.
+2. The backend validates the request (file name, size within `MAX_FILE_SIZE_MB`).
+3. It calls `blobServiceClient.getUserDelegationKey()` using `DefaultAzureCredential` (managed identity in production, `az login` locally) — no storage account key is involved.
+4. It generates a SAS token scoped to a single blob name (timestamped + UUID-prefixed to avoid collisions) with `create` and `write` permissions only, and a configurable expiry (default 20 minutes).
+5. The full pre-signed `uploadUrl` and the `blobName` are returned to the browser.
+
+No storage keys are stored in code or passed to the client. The SAS is the only credential the browser ever sees, and it expires shortly after issuance.
+
+### Frontend — Chunked Block Upload (`BlockBlobClient`)
+
+Files **100 MB and above** use the Azure Storage JavaScript SDK's `BlockBlobClient.uploadBrowserData()` for chunked parallel upload:
+
+1. On file selection, `requestUploadSas()` calls the backend and retrieves the pre-signed URL.
+2. A `BlockBlobClient` is instantiated with that URL (no account key needed — the SAS is embedded in the URL).
+3. `uploadBrowserData()` splits the file into **8 MB blocks** and uploads up to **2 blocks in parallel**:
+   - Each block is sent as a separate `PUT` request to the Azure Block Blob API's `?comp=block` endpoint.
+   - Once all blocks are uploaded, the SDK issues a final `PUT ?comp=blocklist` commit request to assemble them into the complete blob.
+4. An `onProgress` callback fires after each committed block, updating the Uppy Dashboard progress bar.
+
+Files **under 100 MB** are sent as a single XHR `PUT` request with the `x-ms-blob-type: BlockBlob` header, which is simpler and avoids the block commit overhead for small files.
+
+```
+Browser                      Express Backend            Azure Blob Storage
+  |                                |                           |
+  |-- POST /api/upload/sas ------->|                           |
+  |                                |-- getUserDelegationKey -->|
+  |                                |<-- delegation key --------|
+  |<-- { uploadUrl, blobName } ----|                           |
+  |                                                            |
+  |-- PUT uploadUrl?comp=block&blockid=1 (8 MB) ------------->|
+  |-- PUT uploadUrl?comp=block&blockid=2 (8 MB) ------------->|  (parallel)
+  |   ... (N blocks) ...                                       |
+  |-- PUT uploadUrl?comp=blocklist -------------------------->|
+  |<-- 201 Created -------------------------------------------|
+```
+
+### Key Configuration Values
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `BLOCK_SIZE` | 8 MB | Size of each chunk sent to Azure |
+| `concurrency` | 2 | Number of blocks uploaded in parallel |
+| `LARGE_FILE_THRESHOLD` | 100 MB | Files above this use block upload; below use single PUT |
+| `SAS_EXPIRY_MINUTES` | 20 min (default) | How long the SAS token remains valid |
+| `MAX_FILE_SIZE_MB` | 2048 MB (default) | Backend rejects SAS requests above this size |
+| Uppy `maxFileSize` | 5 GB | Client-side guard before a SAS is even requested |
+
 ## Security Notes
 
 - Storage account keys are never sent to the client.
