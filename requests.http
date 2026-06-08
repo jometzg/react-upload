@@ -1,0 +1,33 @@
+### POST to API
+POST http://localhost:3000/api/upload/sas
+Content-Type: application/json
+
+{
+  "fileName": "BraveBrowserSetup-BRV011.exe",
+  "fileSize": 104857600,
+  "contentType": "application/zip"
+}
+
+
+####
+az storage account show --name jjfileuploads --query resourceGroup -o tsv
+
+az rest \
+  --method PATCH \
+  --url "https://management.azure.com/subscriptions/1885038d-f891-46b7-9c02-128ed13a7f06/resourceGroups/react-upload-rg/providers/Microsoft.Storage/storageAccounts/jjfileuploads/blobServices/default?api-version=2023-05-01" \
+  --headers "Content-Type=application/json" \
+  --body '{
+    "properties": {
+      "cors": {
+        "corsRules": [
+          {
+            "allowedOrigins": ["http://localhost:5173"],
+            "allowedMethods": ["PUT","GET","OPTIONS","HEAD"],
+            "allowedHeaders": ["*"],
+            "exposedHeaders": ["*"],
+            "maxAgeInSeconds": 200
+          }
+        ]
+      }
+    }
+  }'

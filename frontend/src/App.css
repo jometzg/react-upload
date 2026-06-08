@@ -1,0 +1,100 @@
+.page {
+  width: min(960px, 100%);
+  margin: 0 auto;
+  padding: 2.5rem 1rem 3rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.card {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(25, 35, 45, 0.1);
+  border-radius: 16px;
+  padding: 1rem;
+  box-shadow: 0 18px 40px rgba(15, 28, 40, 0.08);
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(1.7rem, 4.5vw, 2.5rem);
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.2rem;
+}
+
+.subtitle {
+  margin: 0.75rem 0 1rem;
+  color: #324456;
+}
+
+.error {
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  background: #ffe7ea;
+  color: #902336;
+}
+
+.actions {
+  margin: 0 0 0.85rem;
+  display: flex;
+}
+
+.pick-btn {
+  border: 0;
+  border-radius: 9px;
+  padding: 0.58rem 0.9rem;
+  font-weight: 700;
+  background: #0f4a71;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.pick-btn:hover {
+  background: #0c3e60;
+}
+
+.hidden-input {
+  display: none;
+}
+
+.uploads ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.uploads li {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  background: #eef5fa;
+}
+
+.uploads code {
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  background: #0f2231;
+  color: #f5f9fc;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+}
+
+.muted {
+  color: #5e758a;
+}
+
+@media (max-width: 700px) {
+  .uploads li {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
