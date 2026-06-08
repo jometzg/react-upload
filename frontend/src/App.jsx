@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { BlockBlobClient } from '@azure/storage-blob'
 import Uppy from '@uppy/core'
 import Dashboard from '@uppy/react/dashboard'
-import XHRUpload from '@uppy/xhr-upload'
 import GoldenRetriever from '@uppy/golden-retriever'
 import '@uppy/core/css/style.min.css'
 import '@uppy/dashboard/css/style.min.css'
 import { requestUploadSas } from './services/uploadService'
 import './App.css'
+
+const BLOCK_SIZE = 8 * 1024 * 1024
+const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024
 
 function App() {
   const [error, setError] = useState('')
@@ -14,43 +17,162 @@ function App() {
   const fileInputRef = useRef(null)
 
   const uppy = useMemo(() => {
-    return new Uppy({
+    const uploader = new Uppy({
       autoProceed: true,
       restrictions: {
         maxFileSize: 5 * 1024 * 1024 * 1024,
       },
       retryDelays: [0, 1000, 3000, 5000, 10000, 20000],
     })
-      .use(GoldenRetriever)
-      .use(XHRUpload, {
-        formData: false,
-        method: 'PUT',
-        limit: 4,
-        headers: {
-          'x-ms-blob-type': 'BlockBlob',
-        },
-        async endpoint(file) {
+
+    uploader.use(GoldenRetriever)
+
+    uploader.addUploader(async (fileIDs) => {
+      await Promise.all(
+        fileIDs.map(async (fileID) => {
+          const file = uploader.getFile(fileID)
+          if (!file) {
+            return
+          }
+
+          const fileName = file.name
+          const fileSize = file.size
+          const isLargeFile = fileSize > LARGE_FILE_THRESHOLD
+
           try {
+            console.log(
+              `[Upload] Starting ${isLargeFile ? 'large' : 'small'} file: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)}MB)`,
+            )
+
             const sas = await requestUploadSas({
               fileName: file.name,
               fileSize: file.size,
               contentType: file.type || 'application/octet-stream',
             })
-            uppy.setFileMeta(file.id, {
+
+            console.log(`[Upload] Got SAS token for ${fileName}, expires: ${sas.expiresOn}`)
+
+            uploader.setFileMeta(fileID, {
               blobName: sas.blobName,
               sasExpiryUtc: sas.expiresOn,
             })
-            return sas.uploadUrl
-          } catch (err) {
-            throw new Error(`SAS request failed: ${err.message}`)
+
+            if (isLargeFile) {
+              // Use BlockBlobClient for large files (chunked upload)
+              console.log(`[Upload] Using BlockBlobClient for ${fileName}`)
+              const blobClient = new BlockBlobClient(sas.uploadUrl)
+              const uploadStartedAt = Date.now()
+              let lastProgressTime = uploadStartedAt
+
+              // Must set uploadStarted in file state before emitting progress events,
+              // otherwise Uppy core's calculateProgress handler ignores them.
+              uploader.setFileState(fileID, {
+                progress: { uploadStarted: uploadStartedAt, uploadComplete: false, percentage: 0, bytesUploaded: 0, bytesTotal: fileSize },
+              })
+
+              await blobClient.uploadBrowserData(file.data, {
+                blockSize: BLOCK_SIZE,
+                maxSingleShotSize: BLOCK_SIZE,
+                concurrency: 2,
+                blobHTTPHeaders: {
+                  blobContentType: file.type || 'application/octet-stream',
+                },
+                onProgress: ({ loadedBytes }) => {
+                  const now = Date.now()
+                  if (now - lastProgressTime > 2000) {
+                    console.log(
+                      `[Upload] ${fileName} progress: ${(loadedBytes / 1024 / 1024).toFixed(2)}MB / ${(fileSize / 1024 / 1024).toFixed(2)}MB`,
+                    )
+                    lastProgressTime = now
+                  }
+
+                  const currentFile = uploader.getFile(fileID)
+                  if (!currentFile) {
+                    return
+                  }
+
+                  uploader.emit('upload-progress', currentFile, {
+                    uploadStarted: currentFile.progress.uploadStarted || uploadStartedAt,
+                    bytesUploaded: loadedBytes,
+                    bytesTotal: file.size,
+                  })
+                },
+              })
+            } else {
+              // Use simple XHR for small files
+              console.log(`[Upload] Using XHR for ${fileName}`)
+              const uploadStartedAt = Date.now()
+
+              // Must set uploadStarted before emitting progress events
+              uploader.setFileState(fileID, {
+                progress: { uploadStarted: uploadStartedAt, uploadComplete: false, percentage: 0, bytesUploaded: 0, bytesTotal: fileSize },
+              })
+
+              const xhr = new XMLHttpRequest()
+              const uploadPromise = new Promise((resolve, reject) => {
+                xhr.upload.addEventListener('progress', (event) => {
+                  if (event.lengthComputable) {
+                    const currentFile = uploader.getFile(fileID)
+                    if (currentFile) {
+                      uploader.emit('upload-progress', currentFile, {
+                        uploadStarted: uploadStartedAt,
+                        bytesUploaded: event.loaded,
+                        bytesTotal: event.total,
+                      })
+                    }
+                  }
+                })
+
+                xhr.addEventListener('load', () => {
+                  if (xhr.status === 201) {
+                    console.log(`[Upload] XHR completed for ${fileName}`)
+                    resolve()
+                  } else {
+                    reject(new Error(`HTTP ${xhr.status}: ${xhr.statusText}`))
+                  }
+                })
+
+                xhr.addEventListener('error', () => {
+                  reject(new Error('XHR network error'))
+                })
+
+                xhr.addEventListener('abort', () => {
+                  reject(new Error('XHR aborted'))
+                })
+
+                xhr.open('PUT', sas.uploadUrl)
+                xhr.setRequestHeader('x-ms-blob-type', 'BlockBlob')
+                xhr.send(file.data)
+              })
+
+              await uploadPromise
+            }
+
+            const currentFile = uploader.getFile(fileID)
+            if (!currentFile) {
+              return
+            }
+
+            console.log(`[Upload] Success: ${fileName}`)
+            uploader.emit('upload-success', currentFile, {
+              status: 201,
+              body: {
+                url: sas.uploadUrl,
+              },
+              uploadURL: sas.uploadUrl,
+            })
+          } catch (uploadError) {
+            console.error(`[Upload] Error for ${fileName}:`, uploadError)
+            const currentFile = uploader.getFile(fileID)
+            if (currentFile) {
+              uploader.emit('upload-error', currentFile, uploadError)
+            }
           }
-        },
-        getResponseData(response) {
-          return {
-            url: response.responseURL || '',
-          }
-        },
-      })
+        }),
+      )
+    })
+
+    return uploader
   }, [])
 
   useEffect(() => {
