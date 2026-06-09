@@ -103,32 +103,47 @@ The backend never receives the file itself. It only issues a **User Delegation S
 
 No storage keys are stored in code or passed to the client. The SAS is the only credential the browser ever sees, and it expires shortly after issuance.
 
-### Frontend — Chunked Block Upload (`BlockBlobClient`)
+### Frontend — Dual Upload Strategy
 
-Files **100 MB and above** use the Azure Storage JavaScript SDK's `BlockBlobClient.uploadBrowserData()` for chunked parallel upload:
+The uploader uses a single Uppy custom uploader registered with `addUploader()`. When a file is added, the code checks its size against `LARGE_FILE_THRESHOLD` (100 MB) and picks the appropriate strategy.
 
-1. On file selection, `requestUploadSas()` calls the backend and retrieves the pre-signed URL.
-2. A `BlockBlobClient` is instantiated with that URL (no account key needed — the SAS is embedded in the URL).
-3. `uploadBrowserData()` splits the file into **8 MB blocks** and uploads up to **2 blocks in parallel**:
-   - Each block is sent as a separate `PUT` request to the Azure Block Blob API's `?comp=block` endpoint.
-   - Once all blocks are uploaded, the SDK issues a final `PUT ?comp=blocklist` commit request to assemble them into the complete blob.
-4. An `onProgress` callback fires after each committed block, updating the Uppy Dashboard progress bar.
+#### Small files (< 100 MB) — Single XHR PUT
 
-Files **under 100 MB** are sent as a single XHR `PUT` request with the `x-ms-blob-type: BlockBlob` header, which is simpler and avoids the block commit overhead for small files.
+1. `requestUploadSas()` fetches a pre-signed URL from the backend.
+2. A plain `XMLHttpRequest` sends the entire file body as a single `PUT` to the SAS URL with the `x-ms-blob-type: BlockBlob` header.
+3. The XHR `upload.progress` event updates the Uppy Dashboard progress bar as bytes are sent.
+4. A 201 response from Azure signals success.
+
+This avoids the multi-request overhead of chunking for files where a single request is reliable.
+
+#### Large files (≥ 100 MB) — Chunked Block Upload via `BlockBlobClient`
+
+1. `requestUploadSas()` fetches a pre-signed URL from the backend.
+2. A `BlockBlobClient` is instantiated with the SAS URL (the SAS is embedded — no account key is needed in the browser).
+3. Before upload begins, `uppy.setFileState()` initialises `progress.uploadStarted` in Uppy's internal state. This is required because Uppy's `calculateProgress` handler silently drops progress events for files that have not been marked as started.
+4. `uploadBrowserData()` splits the file into **8 MB blocks** and sends up to **2 blocks in parallel**:
+   - Each block is a separate `PUT` to Azure's Block Blob API at `?comp=block&blockid=<id>`.
+   - After all blocks are staged, the SDK issues a final `PUT ?comp=blocklist` to commit them into a single blob.
+5. The `onProgress` callback receives a running `loadedBytes` total as data is written to the network. It emits an `upload-progress` event to Uppy (throttled to every 2 seconds), which drives the Dashboard progress bar.
 
 ```
-Browser                      Express Backend            Azure Blob Storage
-  |                                |                           |
-  |-- POST /api/upload/sas ------->|                           |
-  |                                |-- getUserDelegationKey -->|
-  |                                |<-- delegation key --------|
-  |<-- { uploadUrl, blobName } ----|                           |
+Browser                        Express Backend          Azure Blob Storage
+  |                                  |                         |
+  |-- POST /api/upload/sas --------->|                         |
+  |                                  |-- getUserDelegationKey->|
+  |                                  |<-- delegation key ------|
+  |<-- { uploadUrl, blobName } ------|                         |
   |                                                            |
-  |-- PUT uploadUrl?comp=block&blockid=1 (8 MB) ------------->|
-  |-- PUT uploadUrl?comp=block&blockid=2 (8 MB) ------------->|  (parallel)
-  |   ... (N blocks) ...                                       |
-  |-- PUT uploadUrl?comp=blocklist -------------------------->|
-  |<-- 201 Created -------------------------------------------|
+  |  [small file]                                             |
+  |-- PUT uploadUrl (full file, x-ms-blob-type: BlockBlob) -->|
+  |<-- 201 Created ------------------------------------------->|
+  |                                                            |
+  |  [large file]                                             |
+  |-- PUT ?comp=block&blockid=1 (8 MB) ---------------------->|
+  |-- PUT ?comp=block&blockid=2 (8 MB) ---------------------->|  (parallel)
+  |   ... repeat for all blocks ...                           |
+  |-- PUT ?comp=blocklist (commit) -------------------------->|
+  |<-- 201 Created ------------------------------------------->|
 ```
 
 ### Key Configuration Values
@@ -141,6 +156,31 @@ Browser                      Express Backend            Azure Blob Storage
 | `SAS_EXPIRY_MINUTES` | 20 min (default) | How long the SAS token remains valid |
 | `MAX_FILE_SIZE_MB` | 2048 MB (default) | Backend rejects SAS requests above this size |
 | Uppy `maxFileSize` | 5 GB | Client-side guard before a SAS is even requested |
+
+## Why These Frameworks
+
+### React
+React's component model and hook system (`useMemo`, `useEffect`, `useRef`) make it straightforward to manage the lifecycle of a stateful Uppy instance — initialising it once, attaching event listeners cleanly, and tearing it down on unmount. Its large ecosystem also means first-class support from Uppy via `@uppy/react`.
+
+### Vite
+Vite provides a fast development server with HMR (hot module replacement) and a built-in proxy configuration. The proxy (`/api` → `http://localhost:3000`) avoids CORS issues during local development without any extra tooling. It also handles the bundling of the Azure Storage SDK cleanly for the browser.
+
+### Uppy
+Uppy is a well-maintained, modular file upload library that provides:
+- A polished drag-and-drop Dashboard UI out of the box
+- An `addUploader()` hook that allows fully custom upload logic while retaining all of Uppy's state management, progress tracking, and retry infrastructure
+- The **GoldenRetriever** plugin, which caches file data in IndexedDB so that an interrupted upload can be resumed after a page refresh
+- A `retryDelays` option that automatically retries failed uploads with exponential back-off
+
+Uppy was chosen over building a custom drag-and-drop UI because it handles the many edge cases (multiple files, file type restrictions, progress, errors, retries) that are tedious to implement correctly from scratch.
+
+### Express (Node.js)
+Express is minimal and unopinionated, which suits the backend's single responsibility: validate a request and issue a SAS token. It adds no overhead beyond what is needed. `express-rate-limit` and `cors` middleware are standard packages that cover the two main API-level concerns (abuse prevention and origin restriction) with minimal configuration.
+
+### `@azure/storage-blob` + `@azure/identity`
+The official Azure SDK packages are used on both ends:
+- **Backend** (`@azure/storage-blob`, `@azure/identity`): `DefaultAzureCredential` from `@azure/identity` works without code changes across local development (`az login`), CI, and Azure-hosted environments (managed identity). `generateBlobSASQueryParameters` with a User Delegation Key avoids ever needing a storage account key.
+- **Frontend** (`@azure/storage-blob`): `BlockBlobClient.uploadBrowserData()` handles block splitting, parallel requests, and the final commit entirely within the SDK, removing the need for custom chunking logic in application code.
 
 ## Security Notes
 
