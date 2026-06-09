@@ -193,3 +193,178 @@ The official Azure SDK packages are used on both ends:
 - Add real user authentication/authorization before issuing SAS
 - Add post-upload malware scanning workflow
 - Add server-side audit logging for upload requests
+
+## Azure Deployment Guide (Backend + Frontend)
+
+This runbook deploys the current Node backend to Azure Web App `jjuploadapp` and the Vite frontend to Azure Web App `jjuploadui`.
+
+### Assumed Azure Resources
+
+- Resource group: `react-upload-rg`
+- Backend app: `jjuploadapp`
+- Frontend app: `jjuploadui`
+- Storage account: `jjfileuploads`
+
+Resolve hostnames (use these exact outputs in later commands):
+
+```bash
+az webapp show --resource-group react-upload-rg --name jjuploadapp --query defaultHostName -o tsv
+az webapp show --resource-group react-upload-rg --name jjuploadui --query defaultHostName -o tsv
+```
+
+### 1) Backend App Configuration (jjuploadapp)
+
+Set startup command and app settings:
+
+```bash
+az webapp config set \
+  --resource-group react-upload-rg \
+  --name jjuploadapp \
+  --startup-file "node src/server.js"
+
+az webapp config appsettings set \
+  --resource-group react-upload-rg \
+  --name jjuploadapp \
+  --settings \
+    AZURE_STORAGE_ACCOUNT_NAME=jjfileuploads \
+    AZURE_STORAGE_BLOB_CONTAINER_NAME=uploads \
+    FRONTEND_ORIGIN=https://jjuploadui-dvfcg4bfh8b7brgs.uksouth-01.azurewebsites.net \
+    MAX_FILE_SIZE_MB=2048 \
+    SAS_EXPIRY_MINUTES=20 \
+    SAS_RATE_LIMIT_PER_MINUTE=30
+```
+
+Enable system-assigned managed identity and grant storage access:
+
+```bash
+az webapp identity assign \
+  --resource-group react-upload-rg \
+  --name jjuploadapp
+
+APP_PRINCIPAL_ID=$(az webapp identity show \
+  --resource-group react-upload-rg \
+  --name jjuploadapp \
+  --query principalId -o tsv)
+
+STORAGE_ID=$(az storage account show \
+  --resource-group react-upload-rg \
+  --name jjfileuploads \
+  --query id -o tsv)
+
+az role assignment create \
+  --assignee-object-id "$APP_PRINCIPAL_ID" \
+  --assignee-principal-type ServicePrincipal \
+  --role "Storage Blob Data Contributor" \
+  --scope "$STORAGE_ID"
+```
+
+### 2) Backend Deployment (Node source zip)
+
+Create and deploy backend zip from the backend folder:
+
+```bash
+cd backend
+zip -r ../backend.zip . -x "node_modules/*" ".git/*" ".env" ".env.example"
+
+az webapp deploy \
+  --resource-group react-upload-rg \
+  --name jjuploadapp \
+  --src-path ../backend.zip \
+  --type zip
+```
+
+If your deployment mode does not run Oryx build automatically, either:
+
+- include `node_modules` in the zip after `npm ci --production`, or
+- switch to zip deploy via SCM API path (`az webapp deployment source config-zip`).
+
+Verify backend:
+
+```bash
+curl -i https://jjuploadapp-d4hhfdf3dyg4hmek.uksouth-01.azurewebsites.net/api/health
+```
+
+### 3) Frontend Build and Deployment (jjuploadui)
+
+Set production API URL before build:
+
+```bash
+cd frontend
+echo 'VITE_API_URL=https://jjuploadapp-d4hhfdf3dyg4hmek.uksouth-01.azurewebsites.net/api' > .env.production
+
+source "$HOME/.nvm/nvm.sh"
+npm ci
+npm run build
+
+cd dist
+zip -r ../../frontend-dist.zip .
+cd ..
+```
+
+Configure App Service startup for SPA static serving:
+
+```bash
+az webapp config set \
+  --resource-group react-upload-rg \
+  --name jjuploadui \
+  --startup-file "pm2 serve /home/site/wwwroot --no-daemon --spa"
+```
+
+Deploy frontend zip:
+
+```bash
+az webapp deploy \
+  --resource-group react-upload-rg \
+  --name jjuploadui \
+  --src-path /home/jometzg/react-upload/frontend-dist.zip \
+  --type zip
+```
+
+Verify frontend:
+
+```bash
+curl -I https://jjuploadui-dvfcg4bfh8b7brgs.uksouth-01.azurewebsites.net
+```
+
+### 4) Blob CORS for Browser Direct Uploads
+
+Uploads go directly from browser to Blob Storage, so Blob service CORS must allow the frontend origin.
+
+Apply a known-good Blob CORS rule:
+
+```bash
+CORS='[{"allowedOrigins":["https://jjuploadui-dvfcg4bfh8b7brgs.uksouth-01.azurewebsites.net","http://localhost:5173","http://127.0.0.1:5173"],"allowedMethods":["DELETE","GET","HEAD","MERGE","OPTIONS","PATCH","POST","PUT"],"allowedHeaders":["*"],"exposedHeaders":["Content-Length","ETag","x-ms-*"],"maxAgeInSeconds":3600}]'
+
+az storage account blob-service-properties update \
+  --resource-group react-upload-rg \
+  --account-name jjfileuploads \
+  --set cors.corsRules="$CORS"
+
+az storage account blob-service-properties show \
+  --resource-group react-upload-rg \
+  --account-name jjfileuploads \
+  --query "cors.corsRules" -o json
+```
+
+### 5) End-to-End Smoke Test
+
+1. Open frontend URL.
+2. Upload a file.
+3. Confirm API returns SAS and browser PUTs to Blob without CORS errors.
+
+Optional API test:
+
+```bash
+curl -i \
+  -H "Origin: https://jjuploadui-dvfcg4bfh8b7brgs.uksouth-01.azurewebsites.net" \
+  https://jjuploadapp-d4hhfdf3dyg4hmek.uksouth-01.azurewebsites.net/api/health
+```
+
+## Lessons Learned (What Broke and Why)
+
+1. Blob CORS origin must include scheme (`https://...`). A bare hostname will fail browser preflight.
+2. Backend CORS and Blob CORS are separate controls. Health checks can pass while uploads still fail.
+3. Some deployments to Linux App Service do not run build automation by default. If dependencies are missing at runtime (`ERR_MODULE_NOT_FOUND`), either ensure Oryx build is triggered or deploy with `node_modules` included.
+4. Use App Service app settings for production config; do not depend on `.env` files in deployed packages.
+5. App hostname may not be the short `*.azurewebsites.net` form; always read the actual `defaultHostName` from Azure and use that in `VITE_API_URL` and CORS settings.
+6. If storage disallows key auth, manage CORS via ARM (`az storage account blob-service-properties update`) rather than key-based data-plane CORS commands.
