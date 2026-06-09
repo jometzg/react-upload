@@ -31,18 +31,15 @@ terraform output
 ### What Gets Created
 
 ✅ Resource Group  
-✅ Virtual Network (10.0.0.0/16) with 2 subnets  
-✅ Private Storage Account (no public internet access)  
+✅ Public Storage Account with CORS (for browser SAS uploads)  
 ✅ Storage "uploads" container  
-✅ Private Endpoint for secure storage access  
 ✅ Linux App Service (B1 tier = free)  
 ✅ Managed Identity for App Service  
 ✅ Storage Blob Data Contributor role assignment  
 
 ### Cost Estimate (B1 tier, LRS storage)
 - App Service Plan B1: ~$12/month
-- Storage Account: ~$0.25/month (minimal upload traffic)
-- VNet/Private Endpoint: Free
+- Storage Account: ~$0.25/month (minimal traffic)
 - **Total: ~$12/month**
 
 ### After Deployment
@@ -53,7 +50,7 @@ terraform output
    zip -r backend.zip . -x "venv/*" "__pycache__/*" ".git/*"
    az webapp deployment source config-zip \
      --resource-group react-upload-rg \
-     --name $(terraform output -raw app_service_name | cut -d. -f1) \
+     --name $(terraform output -raw app_service_name) \
      --src backend.zip
    ```
 
@@ -68,15 +65,7 @@ terraform destroy
 # Type 'yes' to confirm - THIS DELETES EVERYTHING
 ```
 
-### For Production
-
-See `README.md` for:
-- Remote Terraform state in Azure Storage
-- Auto-scaling configuration
-- Monitoring setup
-- Custom domains
-- CI/CD integration
-
 ---
 
 **Need help?** See the full [README.md](README.md) in this directory.
+

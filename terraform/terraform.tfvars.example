@@ -7,15 +7,10 @@ app_name              = "react-upload"
 
 # IMPORTANT: Must be globally unique and 3-24 lowercase alphanumeric characters
 app_service_name      = "react-upload-app-CHANGEME"
-storage_account_name  = "uploadstgACHANGEME"
-
-# Network configuration
-vnet_cidr              = "10.0.0.0/16"
-app_subnet_cidr        = "10.0.1.0/24"
-storage_subnet_cidr    = "10.0.2.0/24"
+storage_account_name  = "uploadstgCHANGEME"
 
 # App Service Plan SKU: B1 (free tier), B2, B3, P1V2 (production)
-app_service_sku        = "B1"
+app_service_sku       = "B1"
 
 # CORS origin for the frontend (update with your frontend URL in production)
-frontend_origin        = "http://localhost:5173"
+frontend_origin       = "http://localhost:5173"
