@@ -188,11 +188,17 @@ The official Azure SDK packages are used on both ends:
 - SAS tokens are scoped to one blob with create/write and short expiration.
 - API includes basic rate limiting and CORS origin restriction.
 
+To address secruriy conscerns of this approach: "The Uppy + SAS approach is a valid pattern for large file uploads because it keeps the API out of the high-volume data path and avoids App Gateway WAF request size limits. The security trade-off is that the WAF no longer inspects the upload stream, so we must replace that single control with layered controls: user delegation SAS, short-lived per-object permissions, strict CORS, server-side upload session validation, quarantine storage, Defender for Storage malware scanning, and a clean-file promotion workflow. If policy requires uploaded bytes to traverse a WAF, we should use an Azure Front Door WAF-to-Blob pattern for the upload endpoint."
+
 ## Next Improvements
 
 - Add real user authentication/authorization before issuing SAS
-- Add post-upload malware scanning workflow
+- Validate that the SAS is scoped as narrowly as possible
 - Add server-side audit logging for upload requests
+- Upload only to a staging/quarantine container.
+- Use Defender for Storage on-upload malware scanning
+- Use Event Grid/queue-based post-upload processing
+- Promote only validated and clean files to the trusted application container
 
 ## Azure Deployment Guide (Backend + Frontend)
 
